@@ -1,16 +1,19 @@
+import signal
+import sys
+
 import torch
 import torch.nn as nn
-import csv
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
 import numpy as np
+import csv
+from sklearn.preprocessing import MinMaxScaler
 
 """ Necessary args """
-filename = r"C:\Users\jw\Downloads\appl.csv"
-outfile_name = r"C:\Users\jw\Downloads\appl_pred.csv"
+filename = r"appl.csv"
+outfile_name = r"appl_pred.csv"
+checkpoint_file_name = r"model.pt"
 train_data_ratio = 0.1
 epochs = 10000
-train_window = 100
+train_window = 60
 
 """ Optional args """
 size_limit = None
@@ -42,6 +45,13 @@ class LSTM(nn.Module):
         lstm_out, self.hidden_cell = self.lstm(input_seq.view(len(input_seq), 1, -1), self.hidden_cell)
         predictions = self.linear(lstm_out.view(len(input_seq), -1))
         return predictions[-1]
+
+def signal_handler(sig, frame):
+    print('You pressed Ctrl+C!')
+    eval()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
 
 if torch.cuda.is_available():
     dev = "cuda:0"
@@ -99,44 +109,54 @@ print("@@@@@@@@@ printing model @@@@@@@@@@")
 print(model)
 print("@@@@@@@@@ printed model @@@@@@@@@@")
 
-for i in range(epochs):
-    for seq, labels in train_inout_seq:
-        optimizer.zero_grad()
-        model.hidden_cell = (torch.zeros(1, 1, model.hidden_layer_size).to(dev),
-                             torch.zeros(1, 1, model.hidden_layer_size).to(dev))
+def train():
+    for i in range(epochs):
+        for seq, labels in train_inout_seq:
+            optimizer.zero_grad()
+            model.hidden_cell = (torch.zeros(1, 1, model.hidden_layer_size).to(dev),
+                                 torch.zeros(1, 1, model.hidden_layer_size).to(dev))
 
+            seq = seq.to(dev)
+            labels = labels.to(dev)
+
+            y_pred = model(seq).to(dev)
+
+            single_loss = loss_function(y_pred, labels).to(dev)
+            single_loss.backward()
+            optimizer.step()
+
+        print(f'epoch: {i:3} loss: {single_loss.item():10.8f}')
+
+    print(f'epoch: {i:3} loss: {single_loss.item():10.10f}')
+
+def eval():
+    model.eval()
+
+    for i in range(train_window):
+        seq = torch.FloatTensor(test_inputs[-train_window:])
         seq = seq.to(dev)
-        labels = labels.to(dev)
+        with torch.no_grad():
+            model.hidden = (torch.zeros(1, 1, model.hidden_layer_size).to(dev),
+                            torch.zeros(1, 1, model.hidden_layer_size).to(dev))
+            test_inputs.append(model(seq).item())
 
-        y_pred = model(seq).to(dev)
+    actual_predictions = scaler.inverse_transform(np.array(test_inputs[train_window:]).reshape(-1, 1))
 
-        single_loss = loss_function(y_pred, labels).to(dev)
-        single_loss.backward()
-        optimizer.step()
-
-    print(f'epoch: {i:3} loss: {single_loss.item():10.8f}')
-
-print(f'epoch: {i:3} loss: {single_loss.item():10.10f}')
-
-model.eval()
-
-for i in range(train_window):
-    seq = torch.FloatTensor(test_inputs[-train_window:])
-    seq = seq.to(dev)
-    with torch.no_grad():
-        model.hidden = (torch.zeros(1, 1, model.hidden_layer_size).to(dev),
-                        torch.zeros(1, 1, model.hidden_layer_size).to(dev))
-        test_inputs.append(model(seq).item())
-
-actual_predictions = scaler.inverse_transform(np.array(test_inputs[train_window:]).reshape(-1, 1))
-
-for e in actual_predictions:
-        print(str(float(e)))
-
-with open(outfile_name, 'w') as csv_file:
-    cr = csv.writer(csv_file, delimiter=' ')
-    for e in orig_vec:
-        cr.writerow(str(float(e)))
-    cr.writerow('----------------')
     for e in actual_predictions:
-        cr.writerow(str(float(e)))
+            print(str(float(e)))
+
+    with open(outfile_name, 'w') as csv_file:
+        cr = csv.writer(csv_file, delimiter=' ')
+        for e in orig_vec:
+            cr.writerow([str(float(e))])
+        cr.writerow('----------------')
+        for e in actual_predictions:
+            cr.writerow([str(float(e))])
+    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        }, checkpoint_file_name)
+
+train()
+eval()
